@@ -1,10 +1,10 @@
 module mimusic-plugin-example
 
-go 1.25.6
+go 1.26
 
 require (
-	github.com/mimusic-org/plugin v0.0.0
 	github.com/knqyf263/go-plugin v0.9.0
+	github.com/mimusic-org/plugin v0.1.0
 )
 
 require (
