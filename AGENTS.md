@@ -9,6 +9,7 @@
 - [项目结构](#项目结构)
 - [开发步骤](#开发步骤)
 - [核心 API 使用](#核心-api-使用)
+- [数据持久化](#数据持久化)
 - [代码规范](#代码规范)
 - [最佳实践](#最佳实践)
 - [调试与测试](#调试与测试)
@@ -488,6 +489,340 @@ func (p *Plugin) Init(ctx context.Context, request *pbplugin.InitRequest) (*empt
 - 前端代码中引用静态资源时仍需使用 `/api/v1/plugin/{plugin_name}/static/...` 路径
 - `NewStaticHandler` 第2个参数是路由前缀（EntryPath），不需要 `/api/v1/plugin/` 前缀
 - `NewStaticHandler` 第3、4个参数分别是路由管理器和上下文
+
+## 数据持久化
+
+### WASM 文件系统挂载机制
+
+主程序通过 wazero 的 FSConfig 将宿主机的 `data/plugins_data/` 目录挂载到 WASM 沙盒的根目录 `/`。这意味着：
+
+- 插件内访问 `/{plugin_name}/` 即映射到宿主机的 `data/plugins_data/{plugin_name}/`
+- 使用标准 Go 文件 I/O 操作：`os.ReadFile`、`os.WriteFile`、`os.MkdirAll`、`os.Remove` 等
+- 无需引入额外依赖，直接使用 `os` 包即可
+
+```go
+import "os"
+
+// 读取文件
+data, err := os.ReadFile("/myplugin/config.json")
+
+// 写入文件
+err := os.WriteFile("/myplugin/config.json", data, 0644)
+
+// 创建目录
+err := os.MkdirAll("/myplugin/data", 0755)
+
+// 删除文件
+err := os.Remove("/myplugin/cache/temp.json")
+```
+
+### 目录结构规范
+
+每个插件使用 `/{plugin_name}/` 作为自己的数据根目录，建议在 `Init()` 中确保目录存在：
+
+```go
+func (p *Plugin) Init(ctx context.Context, request *pbplugin.InitRequest) (*emptypb.Empty, error) {
+    // 确保插件数据目录存在
+    if err := os.MkdirAll("/myplugin", 0755); err != nil {
+        return &emptypb.Empty{}, fmt.Errorf("failed to create data dir: %w", err)
+    }
+    
+    // 初始化业务管理器，加载持久化数据
+    p.manager, err = NewManager("/myplugin")
+    if err != nil {
+        return &emptypb.Empty{}, err
+    }
+    
+    return &emptypb.Empty{}, nil
+}
+```
+
+**推荐的目录结构**：
+
+```
+/{plugin_name}/
+├── config.json           # 插件配置
+├── data/                 # 业务数据目录
+│   ├── index.json        # 数据索引
+│   └── items/            # 具体数据文件
+│       ├── item1.json
+│       └── item2.json
+└── cache/                # 临时缓存（可选）
+```
+
+### 持久化模式
+
+#### 模式一：单 JSON 配置文件
+
+适用于配置数据、账号信息等结构化配置。参考 mimusic-plugin-xiaomi 的实现：
+
+```go
+// types.go - 定义配置结构
+type Config struct {
+    Accounts []Account `json:"accounts"`
+    Settings Settings  `json:"settings"`
+}
+
+type Account struct {
+    ID       string `json:"id"`
+    Username string `json:"username"`
+    Token    string `json:"token"`
+}
+
+// manager.go - 管理器实现
+type Manager struct {
+    dataDir    string
+    configPath string
+    config     *Config
+}
+
+func NewManager(dataDir string) (*Manager, error) {
+    m := &Manager{
+        dataDir:    dataDir,
+        configPath: dataDir + "/config.json",
+        config:     &Config{},
+    }
+    
+    // 加载配置
+    if err := m.loadConfig(); err != nil {
+        slog.Warn("加载配置失败，使用默认配置", "error", err)
+    }
+    
+    return m, nil
+}
+
+func (m *Manager) loadConfig() error {
+    data, err := os.ReadFile(m.configPath)
+    if err != nil {
+        if os.IsNotExist(err) {
+            return nil // 文件不存在，使用默认配置
+        }
+        return err
+    }
+    return json.Unmarshal(data, m.config)
+}
+
+func (m *Manager) saveConfig() error {
+    data, err := json.MarshalIndent(m.config, "", "  ")
+    if err != nil {
+        return err
+    }
+    return os.WriteFile(m.configPath, data, 0644)
+}
+
+// 业务方法：添加账号后立即保存
+func (m *Manager) AddAccount(account Account) error {
+    m.config.Accounts = append(m.config.Accounts, account)
+    return m.saveConfig() // 每次写操作后立即持久化
+}
+```
+
+#### 模式二：索引 + 文件分离存储
+
+适用于脚本文件、模板文件、用户上传的文件等大量独立文件。参考 mimusic-plugin-lxmusic 的实现：
+
+```go
+// types.go - 定义索引结构
+type SourceIndex struct {
+    Sources []SourceMeta `json:"sources"`
+}
+
+type SourceMeta struct {
+    ID       string `json:"id"`
+    Name     string `json:"name"`
+    Filename string `json:"filename"` // 实际文件名
+    Enabled  bool   `json:"enabled"`
+}
+
+// manager.go - 管理器实现
+type SourceManager struct {
+    dataDir   string
+    indexPath string
+    sourcesDir string
+    index     *SourceIndex
+    scripts   map[string][]byte // 内存缓存
+}
+
+func NewSourceManager(dataDir string) (*SourceManager, error) {
+    m := &SourceManager{
+        dataDir:    dataDir,
+        indexPath:  dataDir + "/index.json",
+        sourcesDir: dataDir + "/sources",
+        index:      &SourceIndex{},
+        scripts:    make(map[string][]byte),
+    }
+    
+    // 确保目录存在
+    if err := os.MkdirAll(m.sourcesDir, 0755); err != nil {
+        return nil, err
+    }
+    
+    // 加载索引和文件
+    if err := m.load(); err != nil {
+        slog.Warn("加载数据失败", "error", err)
+    }
+    
+    return m, nil
+}
+
+func (m *SourceManager) load() error {
+    // 1. 加载索引文件
+    data, err := os.ReadFile(m.indexPath)
+    if err != nil {
+        if os.IsNotExist(err) {
+            return nil
+        }
+        return err
+    }
+    if err := json.Unmarshal(data, m.index); err != nil {
+        return err
+    }
+    
+    // 2. 根据索引加载各个文件
+    for _, meta := range m.index.Sources {
+        filePath := m.sourcesDir + "/" + meta.Filename
+        content, err := os.ReadFile(filePath)
+        if err != nil {
+            slog.Warn("加载文件失败，跳过", "id", meta.ID, "error", err)
+            continue // 优雅降级：跳过损坏文件
+        }
+        m.scripts[meta.ID] = content
+    }
+    
+    return nil
+}
+
+func (m *SourceManager) saveIndex() error {
+    data, err := json.MarshalIndent(m.index, "", "  ")
+    if err != nil {
+        return err
+    }
+    return os.WriteFile(m.indexPath, data, 0644)
+}
+
+// 添加新文件
+func (m *SourceManager) AddSource(id, name string, content []byte) error {
+    filename := id + ".js"
+    filePath := m.sourcesDir + "/" + filename
+    
+    // 1. 保存文件内容
+    if err := os.WriteFile(filePath, content, 0644); err != nil {
+        return err
+    }
+    
+    // 2. 更新索引
+    m.index.Sources = append(m.index.Sources, SourceMeta{
+        ID:       id,
+        Name:     name,
+        Filename: filename,
+        Enabled:  true,
+    })
+    
+    // 3. 保存索引
+    if err := m.saveIndex(); err != nil {
+        return err
+    }
+    
+    // 4. 更新内存缓存
+    m.scripts[id] = content
+    
+    return nil
+}
+
+// 删除文件
+func (m *SourceManager) RemoveSource(id string) error {
+    // 1. 从索引中查找并移除
+    var filename string
+    for i, meta := range m.index.Sources {
+        if meta.ID == id {
+            filename = meta.Filename
+            m.index.Sources = append(m.index.Sources[:i], m.index.Sources[i+1:]...)
+            break
+        }
+    }
+    
+    if filename == "" {
+        return fmt.Errorf("source not found: %s", id)
+    }
+    
+    // 2. 删除文件
+    filePath := m.sourcesDir + "/" + filename
+    if err := os.Remove(filePath); err != nil && !os.IsNotExist(err) {
+        slog.Warn("删除文件失败", "path", filePath, "error", err)
+    }
+    
+    // 3. 保存索引
+    if err := m.saveIndex(); err != nil {
+        return err
+    }
+    
+    // 4. 清除内存缓存
+    delete(m.scripts, id)
+    
+    return nil
+}
+```
+
+**目录结构示例**：
+
+```
+/lxmusic/
+├── index.json            # 元数据索引
+└── sources/              # 实际文件存储
+    ├── source1.js
+    ├── source2.js
+    └── source3.js
+```
+
+### 最佳实践
+
+1. **Init() 时加载数据到内存**
+   ```go
+   func (p *Plugin) Init(ctx context.Context, request *pbplugin.InitRequest) (*emptypb.Empty, error) {
+       // 创建管理器时自动加载持久化数据
+       p.manager, err = NewManager("/myplugin")
+       if err != nil {
+           return &emptypb.Empty{}, err
+       }
+       return &emptypb.Empty{}, nil
+   }
+   ```
+
+2. **每次写操作后立即持久化**
+   ```go
+   // ✓ 推荐：修改后立即保存
+   func (m *Manager) UpdateSetting(key, value string) error {
+       m.config.Settings[key] = value
+       return m.saveConfig() // 立即持久化
+   }
+   
+   // ✗ 避免：等 Deinit 统一保存（可能丢失数据）
+   ```
+
+3. **文件加载失败时优雅降级**
+   ```go
+   for _, meta := range m.index.Sources {
+       content, err := os.ReadFile(filePath)
+       if err != nil {
+           slog.Warn("加载文件失败，跳过", "id", meta.ID, "error", err)
+           continue // 跳过损坏文件，继续加载其他文件
+       }
+       m.scripts[meta.ID] = content
+   }
+   ```
+
+4. **使用 `json.MarshalIndent` 保持可读性**
+   ```go
+   // ✓ 推荐：格式化输出，便于调试
+   data, err := json.MarshalIndent(config, "", "  ")
+   
+   // ✗ 避免：紧凑格式，难以阅读
+   data, err := json.Marshal(config)
+   ```
+
+5. **无需使用文件锁**
+   - WASM 环境是单线程执行的，不存在并发写入问题
+   - 直接使用 `os.WriteFile` 即可，无需 `sync.Mutex` 或文件锁
 
 ## 代码规范
 
