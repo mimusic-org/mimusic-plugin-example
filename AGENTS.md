@@ -169,6 +169,127 @@ mimusic-plugin-myplugin/
 | `handlers/` | HTTP 请求处理 | ✓ |
 | 业务模块 | 核心业务逻辑 | ✓ |
 
+## 前端 UI 规范
+
+插件的 Web 前端界面应遵循 Material Design 3 风格，与 MiMusic Flutter 客户端保持视觉一致。
+
+### 色彩系统
+
+使用 CSS 变量定义 Material Design 3 调色板。主色从 Flutter 客户端的 `ColorScheme.fromSeed(seedColor: Color(0xFF6366F1))` 生成。
+
+```css
+:root {
+    /* 主色 - 与 Flutter 客户端 seedColor indigo 一致 */
+    --md-primary: #595b94;        /* Primary */
+    --md-on-primary: #FFFFFF;
+    --md-primary-container: #E8DEF8;
+    --md-on-primary-container: #21005E;
+
+    /* Surface */
+    --md-surface: #FFFBFE;
+    --md-on-surface: #1C1B1F;
+    --md-on-surface-variant: #49454F;
+    --md-surface-variant: #E7E0EC;
+
+    /* Outline */
+    --md-outline: #79747E;
+    --md-outline-variant: #CAC4D0;
+
+    /* 语义色 */
+    --md-error: #B3261E;
+    --md-on-error: #FFFFFF;
+    --md-error-container: #F9DEDC;
+    --md-success: #2E7D32;
+    --md-success-container: #C8E6C9;
+    --md-warning: #E65100;
+    --md-warning-container: #FFE0B2;
+
+    /* Elevation */
+    --md-surface-1: #F0EEF8;
+    --md-surface-2: #E8E6F2;
+    --md-shadow-1: 0 1px 2px rgba(0,0,0,.12), 0 1px 3px rgba(0,0,0,.08);
+    --md-shadow-2: 0 2px 4px rgba(0,0,0,.14), 0 1px 6px rgba(0,0,0,.1);
+
+    /* 圆角 */
+    --md-radius-sm: 4px;
+    --md-radius-md: 12px;
+    --md-radius-lg: 16px;
+    --md-radius-xl: 20px;
+    --md-radius-full: 50px;
+}
+```
+
+### 字体
+
+使用本地化字体（打包到插件 `static/fonts/` 目录），避免依赖 CDN：
+
+```css
+/* static/css/fonts.css */
+@font-face {
+    font-family: 'Roboto';
+    src: url('/api/v1/plugin/{plugin_name}/static/fonts/roboto-400.woff2') format('woff2');
+    font-weight: 400;
+    font-display: swap;
+}
+/* Material Symbols Outlined 图标字体同样本地化 */
+```
+
+字体族顺序：`'Roboto', 'Noto Sans SC', system-ui, sans-serif`
+
+### 核心组件
+
+插件前端应使用以下 Material Design 3 组件样式（纯 CSS 实现，无框架依赖）：
+
+| 组件 | CSS 类名 | 说明 |
+|------|----------|------|
+| AppBar | `.app-bar` | 固定顶部，主色背景 |
+| Card | `.card` | 圆角 12px，elevation 阴影 |
+| Filled Button | `.btn-filled` | 主色背景，圆角 20px |
+| Outlined Button | `.btn-outlined` | 主色边框，透明背景 |
+| Text Button | `.btn-text` | 无边框，主色文字 |
+| Icon Button | `.btn-icon` | 圆形按钮 |
+| TextField | `.text-field` | Material 风格输入框 |
+| Select | `.select-field` | 下拉选择框 |
+| Switch | `.md-switch` | Material 开关 |
+| Checkbox | 原生 + `accent-color` | 使用主色 |
+| Snackbar | `.snackbar` | 底部提示，替代 alert/toast |
+| Dialog | `.dialog-overlay` + `.dialog` | 模态对话框，替代 confirm() |
+| Progress | `.progress-linear` | 线性进度条 |
+| Tab Bar | `.tab-bar` | 底部 Tab 导航（匹配 Flutter NavigationBar） |
+
+### 布局规范
+
+- **Tab 导航**：当插件有多个功能模块时，使用底部 Tab Bar（固定底部，64px 高度）
+- **响应式断点**：600px（移动）/ 900px（平板）/ 1920px+（TV），与 Flutter 客户端一致
+- **内容容器**：`max-width: 960px`，水平居中
+- **卡片间距**：16px gap
+
+### 认证机制
+
+插件前端从 `localStorage` 获取主程序的认证令牌：
+
+```javascript
+function getAuthToken() {
+    try {
+        const authData = localStorage.getItem('mimusic-auth');
+        if (authData) return JSON.parse(authData).accessToken || '';
+    } catch (e) {}
+    return '';
+}
+
+// 所有 API 请求携带 Authorization header
+headers['Authorization'] = 'Bearer ' + getAuthToken();
+```
+
+### 参考实现
+
+完整的 Material Design 3 前端实现请参考 [mimusic-plugin-lxmusic](https://github.com/mimusic-org/mimusic-plugins/tree/main/mimusic-plugin-lxmusic) 插件：
+- `static/css/style.css` — 完整的 Material Design 3 组件样式
+- `static/css/fonts.css` — 本地字体声明
+- `static/fonts/` — 本地化字体文件（Roboto + Material Symbols）
+- `static/js/app.js` — 前端功能逻辑
+- `static/index.html` — 页面布局
+
 ## 开发步骤
 
 ### 步骤 1: 定义插件元数据

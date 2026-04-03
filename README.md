@@ -41,6 +41,7 @@ GOOS=wasip1 GOARCH=wasm go build -o example.wasm -buildmode=c-shared .
 - 路由注册与 HTTP 处理器
 - 静态资源管理
 - 定时器使用
+- 前端 UI 规范（Material Design 3 样式）
 - 代码规范与最佳实践
 
 ## 相关资源
