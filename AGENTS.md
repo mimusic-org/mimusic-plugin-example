@@ -67,7 +67,32 @@ fetch('/myplugin/api/data')
 
 **原因**：宿主框架会自动将 `/api/v1/plugin/{plugin_name}/` 前缀映射到插件的路由，所以插件注册时使用 `EntryPath` 即可。
 
-**3. 所有 Go 文件必须添加构建标签**
+**3. WASM 插件中不能使用标准库 `net/http` 发起 HTTP 请求**
+
+WASM 环境不支持网络，必须使用 `pluginhttp` 替代：
+
+```go
+import (
+    "net/http"  // 仅用于常量（如 http.StatusOK）和类型（如 http.Request）
+
+    pluginhttp "github.com/mimusic-org/plugin/pkg/go-plugin-http/http"
+)
+
+// ✓ 正确：使用 pluginhttp 发起请求
+resp, err := pluginhttp.Get("https://api.example.com/data")
+defer resp.Body.Close()
+body, _ := io.ReadAll(resp.Body)  // 建议先 ReadAll 再 Unmarshal
+json.Unmarshal(body, &result)
+
+// ✗ 错误：标准库 http.Get 在 WASM 中无法工作
+resp, err := http.Get("https://api.example.com/data")
+```
+
+`pluginhttp` 提供了与标准库类似的 API：`Get`/`Post`/`Head`/`Do`/`NewRequest`/`Client` 等，通过 Host Function 代理实现网络请求。
+
+> **注意**：`pluginhttp.Response.Body` 使用 `json.NewDecoder` 可能不可用，建议先 `io.ReadAll` 读取全部内容再 `json.Unmarshal`。
+
+**4. 所有 Go 文件必须添加构建标签**
 
 每个 Go 文件的开头都必须添加以下构建标签，以确保正确的编译目标：
 
@@ -1285,6 +1310,31 @@ return &plugin.RouterResponse{
 }, nil
 ```
 
+### Q: 如何在插件中发起 HTTP 请求？
+
+A: 使用 `pluginhttp` 包替代标准库 `net/http`：
+
+```go
+import pluginhttp "github.com/mimusic-org/plugin/pkg/go-plugin-http/http"
+
+// GET 请求
+resp, err := pluginhttp.Get("https://api.example.com/data")
+if err != nil {
+    return nil, err
+}
+defer resp.Body.Close()
+body, _ := io.ReadAll(resp.Body)
+
+// POST 请求
+resp, err := pluginhttp.Post("https://api.example.com/submit", "application/json", bytes.NewReader(jsonData))
+
+// 自定义请求
+client := &pluginhttp.Client{Timeout: 30 * time.Second}
+req, _ := pluginhttp.NewRequest("PUT", "https://api.example.com/update", body)
+req.Header.Set("Authorization", "Bearer token")
+resp, err := client.Do(req)
+```
+
 ### Q: 如何访问数据库？
 
 A: 通过宿主提供的 API 接口（需要扩展支持），或使用插件内嵌数据库（如 BoltDB）。
@@ -1342,5 +1392,5 @@ tm.CancelTimer(ctx, timerID)
 
 ---
 
-**最后更新**: 2026-02-24  
+**最后更新**: 2026-04-08  
 **维护者**: MiMusic 团队
