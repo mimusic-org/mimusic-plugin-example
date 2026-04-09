@@ -582,6 +582,183 @@ slog.Warn("警告信息", "error", err)
 slog.Error("错误信息", "error", err, "stack", stack)
 ```
 
+### 执行外部命令
+
+通过 `ExecuteCommand` / `StopCommand` / `GetCommandOutput` Host Function，插件可以在宿主机上执行外部命令。该功能受**双重白名单**限制：插件 EntryPath 和可执行文件名都必须在宿主端硬编码白名单中。
+
+> **注意**：白名单修改需要重新编译宿主端。当前允许的插件为 `/cloudflared`，允许的可执行文件为 `cloudflared` / `cloudflared.exe`。
+
+#### 同步执行命令
+
+```go
+hostFunctions := pbplugin.NewHostFunctions()
+
+resp, err := hostFunctions.ExecuteCommand(ctx, &pbplugin.ExecuteCommandRequest{
+    Command:    "cloudflared",                    // 可执行文件名（不含路径）
+    Args:       []string{"version"},              // 命令参数列表
+    PluginId:   pluginID,                         // 插件 ID
+    Background: false,                            // 同步执行，等待命令完成
+})
+if err != nil {
+    slog.Error("执行命令失败", "error", err)
+    return nil, err
+}
+
+if resp.Success {
+    slog.Info("命令输出", "stdout", resp.Stdout, "stderr", resp.Stderr, "exitCode", resp.ExitCode)
+}
+```
+
+#### 后台执行命令
+
+```go
+const processID = "my-background-process"
+
+// 启动后台命令
+resp, err := hostFunctions.ExecuteCommand(ctx, &pbplugin.ExecuteCommandRequest{
+    Command:    "cloudflared",
+    Args:       []string{"tunnel", "--url", "http://localhost:58091"},
+    PluginId:   pluginID,
+    Background: true,                             // 后台运行
+    ProcessId:  processID,                        // 进程标识符（后台模式必填）
+})
+```
+
+#### 获取后台命令输出
+
+```go
+outputResp, err := hostFunctions.GetCommandOutput(ctx, &pbplugin.GetCommandOutputRequest{
+    ProcessId: processID,
+    PluginId:  pluginID,
+})
+if err == nil && outputResp.Success {
+    slog.Info("进程状态",
+        "running", outputResp.Running,
+        "stdout", outputResp.Stdout,
+        "stderr", outputResp.Stderr,
+        "exitCode", outputResp.ExitCode,
+    )
+}
+```
+
+#### 停止后台命令
+
+```go
+stopResp, err := hostFunctions.StopCommand(ctx, &pbplugin.StopCommandRequest{
+    ProcessId: processID,
+    PluginId:  pluginID,
+})
+if err == nil && stopResp.Success {
+    slog.Info("进程已停止")
+}
+```
+
+**参数说明**：
+
+| 参数 | 类型 | 说明 |
+|------|------|------|
+| `Command` | `string` | 可执行文件名（不含路径），宿主端会自动拼接为 `pluginsDataDir/{entryPath}/bin/{command}` |
+| `Args` | `[]string` | 命令参数列表 |
+| `Env` | `map[string]string` | 额外环境变量（可选） |
+| `PluginId` | `int64` | 插件 ID，通过 `plugin.GetPluginId()` 获取 |
+| `Background` | `bool` | `true` 后台运行，`false` 同步等待完成 |
+| `ProcessId` | `string` | 进程标识符，后台模式必填，用于后续查询/停止 |
+
+**生命周期**：插件卸载时，宿主端会自动停止该插件的所有后台进程。
+
+### 异步下载文件
+
+通过 `DownloadFile` / `GetDownloadStatus` Host Function，插件可以将大文件下载任务交给宿主端异步执行，避免 WASM 环境中的超时问题。宿主端在后台 goroutine 中执行实际下载，插件通过轮询获取进度。
+
+#### 启动异步下载
+
+```go
+hostFunctions := pbplugin.NewHostFunctions()
+
+resp, err := hostFunctions.DownloadFile(ctx, &pbplugin.DownloadFileRequest{
+    Url:               "https://example.com/file.tar.gz",  // 下载 URL
+    DestPath:          "/myplugin/bin/myfile",              // 目标路径（WASM 视角）
+    TaskId:            "download-myfile",                   // 任务标识符（插件自定义）
+    PluginId:          pluginID,                            // 插件 ID
+    ExtractTgz:        true,                                // 是否需要解压 .tgz
+    ExtractTargetName: "myfile",                            // 解压后目标文件名
+})
+if err != nil {
+    return nil, fmt.Errorf("调用 DownloadFile 失败: %w", err)
+}
+
+if resp.Success {
+    slog.Info("下载任务已启动", "taskId", resp.TaskId)
+}
+```
+
+#### 查询下载进度
+
+```go
+statusResp, err := hostFunctions.GetDownloadStatus(ctx, &pbplugin.GetDownloadStatusRequest{
+    TaskId:   "download-myfile",
+    PluginId: pluginID,
+})
+if err == nil && statusResp.Success {
+    slog.Info("下载进度",
+        "status", statusResp.Status,               // "downloading", "completed", "failed", "not_found"
+        "progress", statusResp.ProgressPercent,     // 0-100
+        "downloaded", statusResp.DownloadedBytes,
+        "total", statusResp.TotalBytes,
+        "error", statusResp.Error,                  // 失败时的错误信息
+    )
+}
+```
+
+**参数说明**：
+
+| 参数 | 类型 | 说明 |
+|------|------|------|
+| `Url` | `string` | 下载 URL |
+| `DestPath` | `string` | 目标路径（WASM 视角），宿主端自动转换为宿主机绝对路径 |
+| `TaskId` | `string` | 任务标识符，插件自定义，用于后续查询进度 |
+| `PluginId` | `int64` | 插件 ID |
+| `ExtractTgz` | `bool` | 是否需要解压 `.tgz` 文件（如 macOS 场景） |
+| `ExtractTargetName` | `string` | 解压后目标文件名（仅 `ExtractTgz=true` 时有效） |
+
+**下载状态**：
+
+| 状态 | 说明 |
+|------|------|
+| `downloading` | 正在下载中 |
+| `completed` | 下载完成 |
+| `failed` | 下载失败，`Error` 字段包含错误信息 |
+| `not_found` | 任务不存在（已过期或从未创建） |
+
+**生命周期**：
+- 下载完成或失败后，任务记录保留 **10 分钟**后自动清理
+- 插件卸载时，宿主端会自动清理该插件的所有下载任务
+- 同一 `TaskId` 不能重复提交（正在下载中的任务会拒绝）
+
+**前端轮询示例**（JavaScript）：
+
+```javascript
+// 启动下载
+const resp = await apiPost('/api/download', { platform: serverPlatform });
+if (resp && resp.data && resp.data.success) {
+    // 开始轮询进度
+    const pollTimer = setInterval(async () => {
+        const status = await apiGet('/api/download/status');
+        if (!status || !status.data) return;
+
+        if (status.data.status === 'downloading') {
+            console.log('进度:', status.data.progress_percent + '%');
+        } else if (status.data.status === 'completed') {
+            clearInterval(pollTimer);
+            console.log('下载完成');
+        } else if (status.data.status === 'failed') {
+            clearInterval(pollTimer);
+            console.error('下载失败:', status.data.error);
+        }
+    }, 1000);
+}
+```
+
 ## 静态资源管理
 
 使用 `plugin.NewStaticHandler` 自动注册所有静态资源，无需手动注册每个文件：
