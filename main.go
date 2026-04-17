@@ -18,7 +18,7 @@ import (
 // main 函数是 Go 编译为 Wasm 所必需的。
 func main() {}
 
-// Plugin 实现了小米设备插件的功能。
+// Plugin 实现了插件的功能。
 type Plugin struct{}
 
 // init 将 Plugin 实现注册到插件框架中。
@@ -37,7 +37,6 @@ func (m Plugin) GetPluginInfo(ctx context.Context, request *emptypb.Empty) (*pbp
 			Description: "这是一个示例功能",
 			Author:      "MiMusic Team",
 			Homepage:    "https://github.com/mimusic-org/mimusic-plugin-example",
-			EntryPath:   "/example",
 		},
 	}, nil
 }
