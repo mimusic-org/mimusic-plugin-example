@@ -35,38 +35,6 @@ GOOS=wasip1 GOARCH=wasm go build -o plugin.wasm -buildmode=c-shared .
 GOOS=wasip1 GOARCH=wasm go build -o plugin.wasm .
 ```
 
-**2. 静态资源和 API 路径规范**
-
-**路由注册**时使用 `EntryPath`（如 `/myplugin`），**前端代码使用**时需要添加 `/api/v1/plugin/` 前缀：
-
-```go
-// 路由注册（使用 EntryPath，不需要 /api/v1/plugin/ 前缀）
-rm := plugin.GetRouterManager()
-
-// 使用 NewStaticHandler 自动注册静态资源
-p.staticHandler = plugin.NewStaticHandler(staticFS, "/myplugin", rm, ctx)
-
-// 注册其他业务路由
-rm.RegisterRouter(ctx, "GET", "/myplugin", p.handleIndex, false)
-rm.RegisterRouter(ctx, "GET", "/myplugin/api/data", p.apiHandler.HandleGetData, true)
-```
-
-```javascript
-// 前端代码（需要 /api/v1/plugin/ 前缀）
-// ✓ 正确的路径
-<link rel="stylesheet" href="/api/v1/plugin/myplugin/static/css/style.css">
-<script src="/api/v1/plugin/myplugin/static/js/app.js"></script>
-fetch('/api/v1/plugin/myplugin/api/data')
-fetch('/api/v1/plugin/myplugin/api/submit', { method: 'POST' })
-
-// ✗ 错误的路径（缺少 /api/v1/plugin/ 前缀）
-<link rel="stylesheet" href="/myplugin/static/css/style.css">
-<script src="/myplugin/static/js/app.js"></script>
-fetch('/myplugin/api/data')
-```
-
-**原因**：宿主框架会自动将 `/api/v1/plugin/{plugin_name}/` 前缀映射到插件的路由，所以插件注册时使用 `EntryPath` 即可。
-
 **3. WASM 插件中不能使用标准库 `net/http` 发起 HTTP 请求**
 
 WASM 环境不支持网络，必须使用 `pluginhttp` 替代：
@@ -90,7 +58,9 @@ resp, err := http.Get("https://api.example.com/data")
 
 `pluginhttp` 提供了与标准库类似的 API：`Get`/`Post`/`Head`/`Do`/`NewRequest`/`Client` 等，通过 Host Function 代理实现网络请求。
 
-> **注意**：`pluginhttp.Response.Body` 使用 `json.NewDecoder` 可能不可用，建议先 `io.ReadAll` 读取全部内容再 `json.Unmarshal`。
+> **注意**：
+- 路径不需要包含 EntryPath 前缀，宿主端会自动拼接
+- EntryPath 由宿主端从插件文件名自动提取
 
 **4. 所有 Go 文件必须添加构建标签**
 
@@ -327,12 +297,11 @@ func (p *Plugin) GetPluginInfo(ctx context.Context, request *emptypb.Empty) (*pb
         Success: true,
         Message: "成功获取插件信息",
         Info: &pbplugin.PluginInfo{
-            Name:        "我的插件",           // 插件显示名称
-            Version:     "1.0.0",            // 语义化版本号
-            Description: "插件功能描述",       // 简短描述
-            Author:      "作者名",            // 作者信息
-            Homepage:    "https://...",      // 项目主页
-            EntryPath:   "/myplugin",        // 路由前缀
+            Name:        "插件名称",
+            Version:     "1.0.0",
+            Description: "功能描述",
+            Author:      "作者",
+            Homepage:    "https://...",
         },
     }, nil
 }
@@ -349,31 +318,38 @@ func (p *Plugin) GetPluginInfo(ctx context.Context, request *emptypb.Empty) (*pb
 
 ```go
 func (p *Plugin) Init(ctx context.Context, request *pbplugin.InitRequest) (*emptypb.Empty, error) {
-    slog.Info("正在初始化插件", "version", "1.0.0")
+    slog.Info("正在初始化插件")
     
-    // 1. 初始化管理器和服务
-    p.accountManager, err = account.NewManager("/myplugin")
+    // 初始化账号管理器
+    accountManager, err := account.NewManager("/")
     if err != nil {
-        return &emptypb.Empty{}, fmt.Errorf("failed to create manager: %w", err)
+        return &emptypb.Empty{}, err
     }
+    p.accountManager = accountManager
     
-    // 2. 初始化处理器
-    p.apiHandler = handlers.NewAPIHandler(p.accountManager)
+    // 初始化认证服务
+    authService := auth.NewService(p.accountManager)
+    p.authService = authService
     
-    // 3. 注册路由
+    // 初始化静态资源处理器
+    staticFS := &plugin.FSConfig{
+        Root:   "static",
+        Index:  "index.html",
+    }
+    staticHandler := plugin.NewStaticHandler(staticFS, rm, ctx)
+    p.staticHandler = staticHandler
+    
+    // 初始化 API 处理器
+    apiHandler := handlers.NewAPIHandler(p.accountManager, p.authService)
+    p.apiHandler = apiHandler
+    
+    // 注册路由
     rm := plugin.GetRouterManager()
+    rm.RegisterRouter(ctx, "GET", "/", p.handleIndex, false)
+    rm.RegisterRouter(ctx, "GET", "/api/accounts", p.handleGetAccounts, false)
+    rm.RegisterRouter(ctx, "POST", "/api/accounts", p.handleCreateAccount, false)
     
-    // 使用 NewStaticHandler 自动注册静态资源
-    p.staticHandler = plugin.NewStaticHandler(staticFS, "/myplugin", rm, ctx)
-    
-    // API 接口
-    rm.RegisterRouter(ctx, "GET", "/myplugin/api/data", p.apiHandler.HandleGetData, true)
-    rm.RegisterRouter(ctx, "POST", "/myplugin/api/submit", p.apiHandler.HandleSubmit, true)
-    
-    // 前端页面
-    rm.RegisterRouter(ctx, "GET", "/myplugin", p.handleIndex, false)
-    
-    slog.Info("插件路由注册完成")
+    slog.Info("插件初始化完成")
     return &emptypb.Empty{}, nil
 }
 ```
@@ -443,14 +419,15 @@ rm.RegisterRouter(ctx, "GET", "/users/{id}", handlerFunc, true)
 
 **参数说明**：
 
+#### 路由参数
+
 | 参数 | 类型 | 说明 |
 |------|------|------|
-| `ctx` | `context.Context` | 上下文对象 |
-| `method` | `string` | HTTP 方法（GET/POST/PUT/DELETE 等） |
-| `path` | `string` | 路由路径，以 EntryPath 为前缀 |
-| `handler` | `func(*http.Request) (*plugin.RouterResponse, error)` | 请求处理函数 |
-| `requireAuth` | `bool` | **是否需要认证**。`true` 表示需要用户登录才能访问，`false` 表示公开访问 |
-
+| `ctx` | `context.Context` | 上下文 |
+| `method` | `string` | HTTP 方法（GET、POST、PUT、DELETE 等） |
+| `path` | `string` | 路由路径，不需要 EntryPath 前缀 |
+| `handler` | `HandlerFunc` | 处理函数 |
+| `requireAuth` | `bool` | 是否需要认证 |
 **认证建议**：
 - **静态资源**：设置为 `false`（CSS、JS、图片等不需要认证）
 - **前端页面**：根据需求设置，通常首页设为 `false`
@@ -462,11 +439,11 @@ rm.RegisterRouter(ctx, "GET", "/users/{id}", handlerFunc, true)
 - RESTful 风格设计
 
 ```
-✓ /myplugin/api/users
-✓ /myplugin/api/users/{id}
-✓ /myplugin/static/css/main.css
+✓ /api/users
+✓ /api/users/{id}
+✓ /static/css/main.css
 
-✗ /api/users              // 缺少插件前缀
+✗ /myplugin/api/users     // 包含插件前缀（错误）
 ✗ /MyPlugin/Users         // 大写不规范
 ```
 
@@ -657,8 +634,7 @@ if err == nil && stopResp.Success {
 
 | 参数 | 类型 | 说明 |
 |------|------|------|
-| `Command` | `string` | 可执行文件名（不含路径），宿主端会自动拼接为 `pluginsDataDir/{entryPath}/bin/{command}` |
-| `Args` | `[]string` | 命令参数列表 |
+ExecuteCommand 会自动拼接完整路径：`/api/v1/plugin/{EntryPath}/{Command}`（宿主端行为）| `Args` | `[]string` | 命令参数列表 |
 | `Env` | `map[string]string` | 额外环境变量（可选） |
 | `PluginId` | `int64` | 插件 ID，通过 `plugin.GetPluginId()` 获取 |
 | `Background` | `bool` | `true` 后台运行，`false` 同步等待完成 |
@@ -677,7 +653,7 @@ hostFunctions := pbplugin.NewHostFunctions()
 
 resp, err := hostFunctions.DownloadFile(ctx, &pbplugin.DownloadFileRequest{
     Url:               "https://example.com/file.tar.gz",  // 下载 URL
-    DestPath:          "/myplugin/bin/myfile",              // 目标路径（WASM 视角）
+        DestPath:          "/bin/myfile",                     // 目标路径（WASM 视角）
     TaskId:            "download-myfile",                   // 任务标识符（插件自定义）
     PluginId:          pluginID,                            // 插件 ID
     ExtractTgz:        true,                                // 是否需要解压 .tgz
@@ -759,59 +735,45 @@ if (resp && resp.data && resp.data.success) {
 }
 ```
 
-## 静态资源管理
+### 静态资源管理
 
-使用 `plugin.NewStaticHandler` 自动注册所有静态资源，无需手动注册每个文件：
+插件可以通过 `NewStaticHandler` 提供静态资源访问：
 
 ```go
-// main.go 中直接定义 embed.FS 并使用 NewStaticHandler 自动注册
-//go:build wasip1
-// +build wasip1
+import "github.com/mimusic-org/plugin/api/plugin"
 
-package main
-
-import (
-    "context"
-    "embed"
-    "log/slog"
-
-    "github.com/mimusic-org/plugin/api/pbplugin"
-    "github.com/mimusic-org/plugin/api/plugin"
-    "github.com/knqyf263/go-plugin/types/known/emptypb"
-)
-
-//go:embed static/*
-var staticFS embed.FS
-
-func (p *Plugin) Init(ctx context.Context, request *pbplugin.InitRequest) (*emptypb.Empty, error) {
-    slog.Info("正在初始化插件")
-
-    // 获取路由管理器
-    rm := plugin.GetRouterManager()
-
-    // 创建静态资源处理器（自动注册所有 static 目录下的文件）
-    p.staticHandler = plugin.NewStaticHandler(staticFS, "/myplugin", rm, ctx)
-
-    // 注册其他业务路由
-    rm.RegisterRouter(ctx, "GET", "/myplugin", p.handleIndex, false)
-    rm.RegisterRouter(ctx, "POST", "/myplugin/api/data", p.handleApiData, true)
-
-    slog.Info("插件路由注册完成")
-    return &emptypb.Empty{}, nil
+// 定义静态资源配置
+staticFS := &plugin.FSConfig{
+    Root:   "static",           // 静态资源目录
+    Index:  "index.html",       // 默认索引文件
 }
+
+// 创建静态资源处理器
+plugin.NewStaticHandler(staticFS, rm, ctx)
 ```
 
-**优势**：
-- ✅ 无需手动注册每个静态文件路由
-- ✅ 自动处理 CSS、JS、图片等常见 MIME 类型
-- ✅ 支持子目录结构（如 `/static/css/style.css`、`/static/js/app.js`）
-- ✅ 代码更简洁，易于维护
+**参数说明**：
 
-**注意事项**：
-- 静态文件必须放在 `static/` 目录下
-- 前端代码中引用静态资源时仍需使用 `/api/v1/plugin/{plugin_name}/static/...` 路径
-- `NewStaticHandler` 第2个参数是路由前缀（EntryPath），不需要 `/api/v1/plugin/` 前缀
-- `NewStaticHandler` 第3、4个参数分别是路由管理器和上下文
+- `Root`：静态资源根目录（相对于插件目录）
+- `Index`：默认索引文件名
+
+**目录结构示例**：
+
+```
+plugin/
+├── static/
+│   ├── index.html
+│   ├── css/
+│   │   └── style.css
+│   └── js/
+│       └── app.js
+```
+
+**访问路径**：
+
+- `http://host/api/v1/plugin/myplugin/index.html`
+- `http://host/api/v1/plugin/myplugin/css/style.css`
+- `http://host/api/v1/plugin/myplugin/js/app.js`
 
 ## 数据持久化
 
@@ -827,16 +789,16 @@ func (p *Plugin) Init(ctx context.Context, request *pbplugin.InitRequest) (*empt
 import "os"
 
 // 读取文件
-data, err := os.ReadFile("/myplugin/config.json")
+data, err := os.ReadFile("/config.json")
 
 // 写入文件
-err := os.WriteFile("/myplugin/config.json", data, 0644)
+err := os.WriteFile("/config.json", data, 0644)
 
 // 创建目录
-err := os.MkdirAll("/myplugin/data", 0755)
+err := os.MkdirAll("/data", 0755)
 
 // 删除文件
-err := os.Remove("/myplugin/cache/temp.json")
+err := os.Remove("/cache/temp.json")
 ```
 
 ### 目录结构规范
@@ -846,12 +808,12 @@ err := os.Remove("/myplugin/cache/temp.json")
 ```go
 func (p *Plugin) Init(ctx context.Context, request *pbplugin.InitRequest) (*emptypb.Empty, error) {
     // 确保插件数据目录存在
-    if err := os.MkdirAll("/myplugin", 0755); err != nil {
+    if err := os.MkdirAll("/", 0755); err != nil {
         return &emptypb.Empty{}, fmt.Errorf("failed to create data dir: %w", err)
     }
     
     // 初始化业务管理器，加载持久化数据
-    p.manager, err = NewManager("/myplugin")
+    p.manager, err = NewManager("/")
     if err != nil {
         return &emptypb.Empty{}, err
     }
@@ -1103,7 +1065,7 @@ func (m *SourceManager) RemoveSource(id string) error {
    ```go
    func (p *Plugin) Init(ctx context.Context, request *pbplugin.InitRequest) (*emptypb.Empty, error) {
        // 创建管理器时自动加载持久化数据
-       p.manager, err = NewManager("/myplugin")
+       p.manager, err = NewManager("/")
        if err != nil {
            return &emptypb.Empty{}, err
        }
@@ -1191,14 +1153,14 @@ func (h *Handler) handle_login() {}
 
 ```go
 // ✓ 推荐：明确的错误处理
-accountManager, err := account.NewManager("/myplugin")
+accountManager, err := account.NewManager("/")
 if err != nil {
     slog.Error("创建管理器失败", "error", err)
     return &emptypb.Empty{}, fmt.Errorf("failed to create manager: %w", err)
 }
 
 // ✗ 避免：忽略错误
-accountManager, _ := account.NewManager("/myplugin")
+accountManager, _ := account.NewManager("/")
 ```
 
 ### 注释规范
@@ -1363,7 +1325,7 @@ make build
 
 ```go
 // ✓ 推荐：从配置文件读取
-config := loadConfig("/myplugin/config.json")
+config := loadConfig("/config.json")
 apiKey := config.APIKey
 
 // ✗ 避免：硬编码在代码中
@@ -1438,7 +1400,6 @@ func (p *Plugin) GetPluginInfo(ctx context.Context, request *emptypb.Empty) (*pb
             Description: "功能描述",
             Author:      "作者",
             Homepage:    "https://...",
-            EntryPath:   "/plugin-path",
         },
     }, nil
 }
@@ -1449,7 +1410,7 @@ func (p *Plugin) Init(ctx context.Context, request *pbplugin.InitRequest) (*empt
     rm := plugin.GetRouterManager()
     
     // 注册路由
-    rm.RegisterRouter(ctx, "GET", "/plugin-path", p.handleIndex, false)
+    rm.RegisterRouter(ctx, "GET", "/", p.handleIndex, false)
     
     slog.Info("插件初始化完成")
     return &emptypb.Empty{}, nil

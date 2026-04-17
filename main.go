@@ -48,7 +48,7 @@ func (m *Plugin) Init(ctx context.Context, request *pbplugin.InitRequest) (*empt
 
 	rm := plugin.GetRouterManager()
 
-	rm.RegisterRouter(ctx, "GET", "/exmaple/", func(req *http.Request) (*plugin.RouterResponse, error) {
+	rm.RegisterRouter(ctx, "GET", "/", func(req *http.Request) (*plugin.RouterResponse, error) {
 		return &plugin.RouterResponse{
 			StatusCode: 200,
 			Headers:    map[string]string{"Content-Type": "text/html; charset=utf-8"},
