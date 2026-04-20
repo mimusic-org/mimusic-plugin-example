@@ -44,6 +44,10 @@ GOOS=wasip1 GOARCH=wasm go build -o example.wasm -buildmode=c-shared .
 - 前端 UI 规范（Material Design 3 样式）
 - 代码规范与最佳实践
 
+## 发布
+
+官方插件通过 GitHub Action 自动发布。在插件仓库的 GitHub Actions 页面手动触发 `Release Plugin` workflow 即可完成构建、发布和版本 JSON 推送。详见 [插件开发规范](./AGENTS.md) 中的"发布与部署"章节。
+
 ## 相关资源
 
 - [插件开发规范](./AGENTS.md)

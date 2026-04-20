@@ -1319,6 +1319,80 @@ make build
 # 系统会自动替换旧版本
 ```
 
+### GitHub Action 自动发布
+
+官方插件通过 GitHub Action 实现自动化发布流程。每个插件仓库包含 `.github/workflows/release.yml`，通过 `workflow_dispatch` 手动触发。
+
+#### 发布流程
+
+1. **触发 Release workflow**（通过 GitHub Actions 页面手动触发，或使用 `gh workflow run` 命令）
+2. **自动生成版本号**（日期格式 `Y.M.D`，也可手动指定）
+3. **更新 `main.go` 中的版本号**并提交
+4. **构建 WASM** 并打包为 `.wasm.zip`
+5. **创建 GitHub Release** 并上传构建产物
+6. **推送版本 JSON** 到 `mimusic-org/plugins` 仓库（用于客户端检查更新）
+7. **发布评论** 到 mimusic issue #4
+
+#### 版本 JSON 格式
+
+发布时会自动生成版本 JSON 文件并推送到 `mimusic-org/plugins` 仓库，供客户端检查更新：
+
+```
+https://raw.githubusercontent.com/mimusic-org/plugins/main/{pluginName}.json
+```
+
+JSON 格式：
+
+```json
+{
+  "version": "2026.4.20",
+  "download_url": "https://github.com/mimusic-org/plugins/releases/download/plugin-xiaomi-2026.4.20/xiaomi.wasm.zip"
+}
+```
+
+### 客户端插件更新
+
+MiMusic 后端提供了插件更新检查和执行更新的 API：
+
+#### 检查更新
+
+```
+GET /api/v1/plugins/{id}/check-update?github_proxy={proxy}
+```
+
+返回：
+
+```json
+{
+  "has_update": true,
+  "current_version": "2026.3.1",
+  "remote_version": "2026.4.20",
+  "download_url": "https://github.com/.../xiaomi.wasm.zip"
+}
+```
+
+#### 执行更新
+
+```
+POST /api/v1/plugins/{id}/update
+```
+
+请求体（可选）：
+
+```json
+{
+  "github_proxy": "https://ghproxy.com/"
+}
+```
+
+更新流程：
+1. 从远程下载 `.wasm` 或 `.wasm.zip` 文件
+2. 如果是 `.zip` 文件，自动解压提取 `.wasm` 文件
+3. 验证新插件文件（获取插件信息）
+4. 禁用旧插件 → 替换文件 → 更新数据库 → 重新启用
+
+> **GitHub 代理**：`github_proxy` 参数可选，用于在网络受限环境下通过代理访问 GitHub。代理前缀会自动拼接到 GitHub URL 前面。
+
 ## 安全注意事项
 
 ### 1. 敏感信息保护
@@ -1530,5 +1604,5 @@ tm.CancelTimer(ctx, timerID)
 
 ---
 
-**最后更新**: 2026-04-08  
+**最后更新**: 2026-04-20  
 **维护者**: MiMusic 团队
